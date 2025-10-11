@@ -15,6 +15,8 @@
 
 ### 🚀 Features That Set Us Apart
 
+![Hackstars v0.3.0](https://able.sfo2.cdn.digitaloceanspaces.com/hackstars_v0.3.0_screenshot)
+
 #### Unlimited Downloads
 Download as many tracks as you want, whenever you want. No daily limits, no monthly caps.
 
