@@ -1,10 +1,10 @@
 {
-  "name": "beatstars-dq",
+  "name": "hushpuppy",
   "version": "1.0.0",
-  "description": "**Hackstars** is a powerful, user-friendly desktop application that lets you download high-quality tracks from Beatstars without any restrictions or fees. Say goodbye to subscription limits and hello to unlimited music downloads.",
+  "description": "Hushpuppy Audio Downloader — a Discord bot that downloads audio from BeatStars, SoundCloud, TrakTrain, and YouTube.",
   "main": "index.js",
   "bin": {
-    "beatstars-dq": "./index.js"
+    "hushpuppy": "./index.js"
   },
   "scripts": {
     "bot": "node bot.js",
