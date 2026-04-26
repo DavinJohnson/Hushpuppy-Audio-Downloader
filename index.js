@@ -103,7 +103,7 @@ async function run() {
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     console.log(`
-beatstars-dq — download beats from BeatStars, SoundCloud, TrakTrain, and YouTube
+hushpuppy — download audio from BeatStars, SoundCloud, TrakTrain, and YouTube
 
 Usage:
   node index.js <url> [url ...] [-o output-dir]
@@ -139,7 +139,7 @@ Examples:
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
   const total = inputs.length;
-  console.log(`\nbeatstars-dq — ${total} track${total === 1 ? '' : 's'} to download`);
+  console.log(`\nhushpuppy — ${total} track${total === 1 ? '' : 's'} to download`);
   console.log(`Output: ${outDir}`);
   if (total > 1) console.log(`Concurrency: ${CONCURRENCY} at a time\n`);
 

@@ -12,16 +12,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DavinJohnson/beatstars-dq.git"
+    "url": "git+https://github.com/DavinJohnson/Hushpuppy-Audio-Downloader.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/DavinJohnson/beatstars-dq/issues"
+    "url": "https://github.com/DavinJohnson/Hushpuppy-Audio-Downloader/issues"
   },
-  "homepage": "https://github.com/DavinJohnson/beatstars-dq#readme",
+  "homepage": "https://github.com/DavinJohnson/Hushpuppy-Audio-Downloader#readme",
   "dependencies": {
     "discord.js": "^14.26.3",
     "dotenv": "^17.4.2",

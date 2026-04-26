@@ -12,7 +12,7 @@ A Discord bot that downloads audio from BeatStars, SoundCloud, TrakTrain, and Yo
 ## Setup
 
 ```bash
-git clone https://github.com/DavinJohnson/beatstars-dq.git
+git clone https://github.com/DavinJohnson/Hushpuppy-Audio-Downloader.git
 cd beatstars-dq
 npm install
 cp .env.example .env
