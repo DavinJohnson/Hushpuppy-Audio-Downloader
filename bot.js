@@ -7,6 +7,7 @@ const os = require('os');
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { sanitizeFilename } = require('./lib');
 const { detectPlatform } = require('./platforms');
+const { checkDemucs, splitStems, VALID_STEMS } = require('./lib/stems');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -29,12 +30,27 @@ const PLATFORM_LABELS = {
 };
 
 async function registerCommands() {
+  const STEM_CHOICES = VALID_STEMS.filter((s) => s !== 'all').map((s) => ({ name: s, value: s }));
+
   const commands = [
     new SlashCommandBuilder()
       .setName('dl')
       .setDescription('Download a beat from BeatStars, SoundCloud, TrakTrain, or YouTube')
       .addStringOption((opt) =>
         opt.setName('url').setDescription('URL to download').setRequired(true)
+      ),
+    new SlashCommandBuilder()
+      .setName('stems')
+      .setDescription('Download a track and split it into stems (requires Demucs on host)')
+      .addStringOption((opt) =>
+        opt.setName('url').setDescription('URL to download').setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('stem')
+          .setDescription('Which stem to get (default: vocals)')
+          .setRequired(false)
+          .addChoices(...STEM_CHOICES)
       ),
   ].map((c) => c.toJSON());
 
@@ -99,6 +115,104 @@ async function handleDownload(input, replyFn) {
   }
 }
 
+async function handleStems(url, stem, replyFn) {
+  const trimmed = url.trim();
+  const platform = detectPlatform(trimmed);
+
+  if (!platform) {
+    await replyFn({ content: `❌ Unsupported URL. Paste a link from BeatStars, SoundCloud, TrakTrain, or YouTube.`, ephemeral: true });
+    return;
+  }
+
+  // Check Demucs availability first
+  const demucsCheck = await checkDemucs();
+  if (!demucsCheck.ok) {
+    await replyFn({
+      content: `❌ Stem splitting unavailable on this host.\n\`\`\`${demucsCheck.message}\`\`\``,
+    });
+    return;
+  }
+
+  const wantedStem = stem || 'vocals';
+
+  await replyFn({ content: `🔍 Looking up track...` });
+
+  let info;
+  try {
+    info = await platform.getInfo(trimmed);
+  } catch (err) {
+    await replyFn({ content: `❌ Failed to fetch track info: ${err.message}` });
+    return;
+  }
+
+  const bpmSuffix = info.bpm ? ` • ${info.bpm} BPM` : '';
+  const displayName = `**${info.artist} - ${info.title}**${bpmSuffix}`;
+  await replyFn({ content: `⬇️ Downloading ${displayName}...` });
+
+  const tempAudio = path.join(os.tmpdir(), `dq-${Date.now()}.${info.ext}`);
+
+  try {
+    await platform.downloadTrack(trimmed, tempAudio);
+  } catch (err) {
+    await replyFn({ content: `❌ Download failed: ${err.message}` });
+    return;
+  }
+
+  await replyFn({ content: `🎛️ Splitting **${wantedStem}** stem from ${displayName}...\n*This may take a few minutes on first run (downloads model ~80MB)*` });
+
+  const tempStemDir = path.join(os.tmpdir(), `dq-stems-${Date.now()}`);
+
+  try {
+    const wantedStems = wantedStem === 'all'
+      ? ['vocals', 'drums', 'bass', 'other']
+      : [wantedStem];
+
+    const stemPaths = await splitStems(tempAudio, tempStemDir, wantedStems);
+
+    const entries = Object.entries(stemPaths);
+    const bpmFile = info.bpm ? ` (${info.bpm} BPM)` : '';
+    const baseLabel = sanitizeFilename(`${info.artist} - ${info.title}${bpmFile}`);
+
+    // For single stem, send directly
+    if (entries.length === 1) {
+      const [stemName, stemPath] = entries[0];
+      const fileSize = fs.statSync(stemPath).size;
+      if (fileSize > DISCORD_MAX_BYTES) {
+        const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+        await replyFn({ content: `❌ ${displayName} **[${stemName}]** is **${sizeMB} MB** — over Discord's 8 MB limit.` });
+        return;
+      }
+      const filename = `${baseLabel} [${stemName}].wav`;
+      const attachment = new AttachmentBuilder(stemPath, { name: filename });
+      await replyFn({ content: `✅ ${displayName} — **${stemName}** stem`, files: [attachment] });
+
+    } else {
+      // Multiple stems: send each that fits, warn about oversized ones
+      const attachments = [];
+      const oversized = [];
+      for (const [stemName, stemPath] of entries) {
+        const fileSize = fs.statSync(stemPath).size;
+        if (fileSize > DISCORD_MAX_BYTES) {
+          oversized.push(`${stemName} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+        } else {
+          attachments.push(new AttachmentBuilder(stemPath, { name: `${baseLabel} [${stemName}].wav` }));
+        }
+      }
+      let content = `✅ ${displayName} — stems`;
+      if (oversized.length) content += `\n⚠️ Couldn't attach (over 8 MB): ${oversized.join(', ')}`;
+
+      // Discord allows up to 10 attachments per message
+      await replyFn({ content, files: attachments });
+    }
+
+  } catch (err) {
+    await replyFn({ content: `❌ Stem splitting failed: ${err.message}` });
+  } finally {
+    if (fs.existsSync(tempAudio)) fs.unlinkSync(tempAudio);
+    if (fs.existsSync(tempStemDir)) fs.rmSync(tempStemDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await registerCommands();
 
@@ -115,14 +229,33 @@ async function main() {
     console.log('Listening for /dl and links from BeatStars, SoundCloud, TrakTrain, YouTube...');
   });
 
-  // /dl slash command
+  // Slash commands
   client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'dl') return;
-    const input = interaction.options.getString('url');
-    await interaction.deferReply();
-    await handleDownload(input, async ({ content, files, ephemeral }) => {
-      try { await interaction.editReply({ content, files: files || [] }); } catch {}
-    });
+    if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'dl') {
+      const input = interaction.options.getString('url');
+      await interaction.deferReply();
+      await handleDownload(input, async ({ content, files }) => {
+        try {
+          await interaction.editReply({ content, files: files || [] });
+        } catch (err) {
+          console.error('editReply failed:', err.message);
+        }
+      });
+
+    } else if (interaction.commandName === 'stems') {
+      const url = interaction.options.getString('url');
+      const stem = interaction.options.getString('stem') || 'vocals';
+      await interaction.deferReply();
+      await handleStems(url, stem, async ({ content, files }) => {
+        try {
+          await interaction.editReply({ content, files: files || [] });
+        } catch (err) {
+          console.error('editReply failed:', err.message);
+        }
+      });
+    }
   });
 
   // Auto-detect supported links in chat

@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const { sanitizeFilename } = require('./lib');
 const { detectPlatform } = require('./platforms');
+const { checkDemucs, splitStems, VALID_STEMS } = require('./lib/stems');
 
 const CONCURRENCY = 3;
 
@@ -22,7 +23,7 @@ async function pool(thunks, limit) {
   return results;
 }
 
-async function downloadOne(input, outDir, index, total) {
+async function downloadOne(input, outDir, index, total, stemsOpt) {
   const prefix = total > 1 ? `[${index}/${total}] ` : '';
   const trimmed = input.trim();
 
@@ -44,7 +45,7 @@ async function downloadOne(input, outDir, index, total) {
   const filename = sanitizeFilename(`${info.artist} - ${info.title}${bpmSuffix}.${info.ext}`);
   const destPath = path.join(outDir, filename);
 
-  if (fs.existsSync(destPath)) {
+  if (fs.existsSync(destPath) && !stemsOpt) {
     console.log(`${prefix}SKIP — already exists: ${filename}`);
     return { ok: true, input, skipped: true };
   }
@@ -52,8 +53,15 @@ async function downloadOne(input, outDir, index, total) {
   console.log(`${prefix}Downloading: ${info.artist} - ${info.title}${bpmSuffix}`);
 
   try {
-    await platform.downloadTrack(trimmed, destPath);
+    if (!fs.existsSync(destPath)) {
+      await platform.downloadTrack(trimmed, destPath);
+    }
     console.log(`${prefix}Done: ${filename}`);
+
+    if (stemsOpt) {
+      await runStemSplit(destPath, outDir, stemsOpt, prefix, `${info.artist} - ${info.title}${bpmSuffix}`);
+    }
+
     return { ok: true, input, destPath };
   } catch (err) {
     console.error(`${prefix}FAIL — ${err.message}`);
@@ -62,9 +70,42 @@ async function downloadOne(input, outDir, index, total) {
   }
 }
 
+async function runStemSplit(audioPath, outDir, stemsOpt, prefix, trackLabel) {
+  const wantedStems = stemsOpt === 'all' ? [] : [stemsOpt];
+  console.log(`${prefix}Splitting stems (${stemsOpt}) for: ${trackLabel}`);
+  console.log(`${prefix}  This may take a few minutes on first run (downloads model ~80MB)...`);
+
+  try {
+    const stemPaths = await splitStems(audioPath, outDir, wantedStems, (line) => {
+      if (line) process.stdout.write(`\r${prefix}  ${line.slice(0, 80).padEnd(80)}`);
+    });
+    process.stdout.write('\n');
+
+    // Move stems next to the source file with clear names
+    const base = path.basename(audioPath, path.extname(audioPath));
+    for (const [stem, stemPath] of Object.entries(stemPaths)) {
+      const destName = sanitizeFilename(`${base} [${stem}].wav`);
+      const destStem = path.join(outDir, destName);
+      fs.renameSync(stemPath, destStem);
+      console.log(`${prefix}  Stem: ${destName}`);
+    }
+
+    // Clean up the empty demucs output subdirs
+    try {
+      const demucsDir = path.join(outDir, 'htdemucs');
+      if (fs.existsSync(demucsDir)) fs.rmSync(demucsDir, { recursive: true, force: true });
+    } catch { /* ignore cleanup errors */ }
+
+  } catch (err) {
+    console.error(`${prefix}Stem split failed: ${err.message}`);
+    throw err;
+  }
+}
+
 function parseInputs(args) {
   const inputs = [];
   let outDir = null;
+  let stemsOpt = null;
   let i = 0;
 
   while (i < args.length) {
@@ -78,6 +119,13 @@ function parseInputs(args) {
         process.exit(1);
       }
       inputs.push(...readLinkFile(filePath));
+    } else if (arg === '--stems' || arg === '-s') {
+      const val = (args[++i] || '').toLowerCase();
+      if (!VALID_STEMS.includes(val)) {
+        console.error(`Error: --stems must be one of: ${VALID_STEMS.join(', ')}`);
+        process.exit(1);
+      }
+      stemsOpt = val;
     } else if (!arg.startsWith('-')) {
       if ((arg.endsWith('.txt') || arg.endsWith('.TXT')) && fs.existsSync(arg)) {
         inputs.push(...readLinkFile(arg));
@@ -88,7 +136,7 @@ function parseInputs(args) {
     i++;
   }
 
-  return { inputs, outDir };
+  return { inputs, outDir, stemsOpt };
 }
 
 function readLinkFile(filePath) {
@@ -106,9 +154,9 @@ async function run() {
 hushpuppy — download audio from BeatStars, SoundCloud, TrakTrain, and YouTube
 
 Usage:
-  node index.js <url> [url ...] [-o output-dir]
-  node index.js links.txt [-o output-dir]
-  node index.js -f links.txt [-o output-dir]
+  node index.js <url> [url ...] [-o output-dir] [--stems <stem>]
+  node index.js links.txt [-o output-dir] [--stems <stem>]
+  node index.js -f links.txt [-o output-dir] [--stems <stem>]
 
 Supported platforms:
   BeatStars   https://www.beatstars.com/beat/...
@@ -119,21 +167,40 @@ Supported platforms:
 Options:
   -o, --output  Output directory (default: ~/Downloads)
   -f, --file    Path to a text file with one URL per line (# = comment)
+  -s, --stems   Split into stems after download. Requires Python + Demucs.
+                Values: vocals | drums | bass | other | all
+
+Stem splitting:
+  Requires Demucs: pip install demucs
+  First run downloads the htdemucs model (~80MB). Subsequent runs are faster.
+  Stem files are saved as "<track> [vocals].wav" etc. in the output folder.
 
 Examples:
   node index.js https://www.beatstars.com/beat/some-beat/13199852
   node index.js https://soundcloud.com/producer/beat-name -o C:\\Beats
   node index.js links.txt
+  node index.js https://soundcloud.com/producer/beat-name --stems vocals
+  node index.js links.txt --stems all
 `);
     process.exit(0);
   }
 
-  const { inputs, outDir: rawOutDir } = parseInputs(args);
+  const { inputs, outDir: rawOutDir, stemsOpt } = parseInputs(args);
   const outDir = rawOutDir ? path.resolve(rawOutDir) : path.join(os.homedir(), 'Downloads');
 
   if (inputs.length === 0) {
     console.error('Error: no URLs provided.');
     process.exit(1);
+  }
+
+  // Check Demucs early if stems requested
+  if (stemsOpt) {
+    const check = await checkDemucs();
+    if (!check.ok) {
+      console.error(`\nStem splitting unavailable: ${check.message}\n`);
+      process.exit(1);
+    }
+    console.log(`Stem splitting: ${stemsOpt} (using Demucs htdemucs)`);
   }
 
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -143,8 +210,10 @@ Examples:
   console.log(`Output: ${outDir}`);
   if (total > 1) console.log(`Concurrency: ${CONCURRENCY} at a time\n`);
 
-  const thunks = inputs.map((input, i) => () => downloadOne(input, outDir, i + 1, total));
-  const results = await pool(thunks, CONCURRENCY);
+  // Stem splitting is sequential (GPU-intensive), don't parallelize
+  const effectiveConcurrency = stemsOpt ? 1 : CONCURRENCY;
+  const thunks = inputs.map((input, i) => () => downloadOne(input, outDir, i + 1, total, stemsOpt));
+  const results = await pool(thunks, effectiveConcurrency);
 
   if (total > 1) {
     const ok = results.filter((r) => r.ok && !r.skipped).length;
