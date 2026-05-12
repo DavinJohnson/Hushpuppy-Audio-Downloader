@@ -25,21 +25,46 @@ async function downloadViaYtDlp(url, destPath) {
   const ytdlp = await getYtDlp();
   const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a|aiff|ogg)$/i, '');
 
-  await new Promise((resolve, reject) => {
-    ytdlp.exec([
-      url,
-      '--format', 'bestaudio/best',   // grab original quality, no re-encode
-      '--no-playlist',
-      '--output', destNoExt + '.%(ext)s',
-      '--quiet',
-      '--no-warnings',
-    ])
-      .on('ytDlpEvent', () => {})
-      .on('error', reject)
-      .on('close', resolve);
-  });
+  const baseArgs = [
+    url,
+    '--format', 'bestaudio/best',
+    '--no-playlist',
+    '--output', destNoExt + '.%(ext)s',
+    '--quiet',
+    '--no-warnings',
+  ];
 
-  // yt-dlp names the file with the actual extension — find and rename to destPath
+  // Try with browser cookies first (gets original WAV when downloads are enabled)
+  // Falls back to unauthenticated if cookies aren't available
+  const browsers = ['chrome', 'firefox', 'edge'];
+  let success = false;
+
+  for (const browser of browsers) {
+    try {
+      await new Promise((resolve, reject) => {
+        ytdlp.exec([...baseArgs, '--cookies-from-browser', browser])
+          .on('ytDlpEvent', () => {})
+          .on('error', reject)
+          .on('close', resolve);
+      });
+      success = true;
+      break;
+    } catch {
+      // browser not found or no cookies — try next
+    }
+  }
+
+  // Final fallback: no cookies
+  if (!success) {
+    await new Promise((resolve, reject) => {
+      ytdlp.exec(baseArgs)
+        .on('ytDlpEvent', () => {})
+        .on('error', reject)
+        .on('close', resolve);
+    });
+  }
+
+  // Rename to destPath regardless of extension yt-dlp chose
   if (!fs.existsSync(destPath)) {
     const exts = ['wav', 'flac', 'aiff', 'mp3', 'ogg', 'm4a', 'opus', 'webm'];
     for (const ext of exts) {
