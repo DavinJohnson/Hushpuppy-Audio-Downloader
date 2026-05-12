@@ -23,14 +23,12 @@ async function getYtDlp() {
 
 async function downloadViaYtDlp(url, destPath) {
   const ytdlp = await getYtDlp();
-  const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a)$/i, '');
+  const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a|aiff|ogg)$/i, '');
 
   await new Promise((resolve, reject) => {
     ytdlp.exec([
       url,
-      '--extract-audio',
-      '--audio-format', 'mp3',
-      '--audio-quality', '0',
+      '--format', 'bestaudio/best',   // grab original quality, no re-encode
       '--no-playlist',
       '--output', destNoExt + '.%(ext)s',
       '--quiet',
@@ -41,10 +39,16 @@ async function downloadViaYtDlp(url, destPath) {
       .on('close', resolve);
   });
 
-  // yt-dlp writes .mp3 — normalise destPath to match
-  const mp3Path = destNoExt + '.mp3';
-  if (fs.existsSync(mp3Path) && mp3Path !== destPath) {
-    fs.renameSync(mp3Path, destPath);
+  // yt-dlp names the file with the actual extension — find and rename to destPath
+  if (!fs.existsSync(destPath)) {
+    const exts = ['wav', 'flac', 'aiff', 'mp3', 'ogg', 'm4a', 'opus', 'webm'];
+    for (const ext of exts) {
+      const candidate = destNoExt + '.' + ext;
+      if (fs.existsSync(candidate)) {
+        fs.renameSync(candidate, destPath);
+        break;
+      }
+    }
   }
 
   if (!fs.existsSync(destPath)) throw new Error('yt-dlp finished but output file not found');
@@ -141,8 +145,14 @@ async function getInfo(input) {
   const transcoding = progressive || hls;
   if (!transcoding && !downloadUrl) throw new Error('No playable stream found for this SoundCloud track');
 
-  // Use WAV download if available, otherwise stream
-  const ext = downloadUrl ? (track.original_format || 'wav') : 'mp3';
+  // Determine best ext: WAV direct download > private track (yt-dlp will get original) > mp3 stream
+  let ext = 'mp3';
+  if (downloadUrl) {
+    ext = (track.original_format || 'wav').toLowerCase();
+  } else if (secretToken) {
+    // Private track — yt-dlp fallback will grab original format, assume wav
+    ext = (track.original_format || 'wav').toLowerCase();
+  }
 
   return {
     title: track.title || 'Unknown',
