@@ -1,6 +1,54 @@
 'use strict';
 
 const { get, download } = require('../lib');
+const path = require('path');
+const fs = require('fs');
+const YTDlpWrap = require('yt-dlp-wrap').default;
+
+const BINARY_DIR = path.join(__dirname, '..', '.bin');
+const BINARY_PATH = path.join(BINARY_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+
+let _ytdlp = null;
+async function getYtDlp() {
+  if (_ytdlp) return _ytdlp;
+  if (!fs.existsSync(BINARY_PATH)) {
+    fs.mkdirSync(BINARY_DIR, { recursive: true });
+    console.log('  Downloading yt-dlp binary (first run only)...');
+    await YTDlpWrap.downloadFromGithub(BINARY_PATH);
+    console.log('  yt-dlp ready.');
+  }
+  _ytdlp = new YTDlpWrap(BINARY_PATH);
+  return _ytdlp;
+}
+
+async function downloadViaYtDlp(url, destPath) {
+  const ytdlp = await getYtDlp();
+  const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a)$/i, '');
+
+  await new Promise((resolve, reject) => {
+    ytdlp.exec([
+      url,
+      '--extract-audio',
+      '--audio-format', 'mp3',
+      '--audio-quality', '0',
+      '--no-playlist',
+      '--output', destNoExt + '.%(ext)s',
+      '--quiet',
+      '--no-warnings',
+    ])
+      .on('ytDlpEvent', () => {})
+      .on('error', reject)
+      .on('close', resolve);
+  });
+
+  // yt-dlp writes .mp3 — normalise destPath to match
+  const mp3Path = destNoExt + '.mp3';
+  if (fs.existsSync(mp3Path) && mp3Path !== destPath) {
+    fs.renameSync(mp3Path, destPath);
+  }
+
+  if (!fs.existsSync(destPath)) throw new Error('yt-dlp finished but output file not found');
+}
 
 const SC_HOME = 'https://soundcloud.com';
 const API = 'https://api-v2.soundcloud.com';
@@ -132,12 +180,23 @@ async function downloadTrack(input, destPath) {
   }
 
   // Resolve the stream URL (transcoding endpoint gives a temp signed URL)
-  if (!info._transcodingUrl) throw new Error('No stream available for this track');
+  if (!info._transcodingUrl) {
+    // No transcoding available — fall back to yt-dlp
+    await downloadViaYtDlp(input.trim(), destPath);
+    return info;
+  }
 
   let streamResolveUrl = `${info._transcodingUrl}?client_id=${info._clientId}`;
   if (info._secretToken) streamResolveUrl += `&secret_token=${info._secretToken}`;
 
   const { status, body } = await get(streamResolveUrl, { headers: SC_HEADERS });
+
+  if (status === 401 || status === 403) {
+    // Private track stream requires OAuth — yt-dlp handles this transparently
+    await downloadViaYtDlp(input.trim(), destPath);
+    return info;
+  }
+
   if (status !== 200) throw new Error(`SoundCloud stream resolve returned HTTP ${status}`);
 
   let streamData;
