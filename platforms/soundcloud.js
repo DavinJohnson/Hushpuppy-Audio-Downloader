@@ -25,14 +25,18 @@ async function downloadViaYtDlp(url, destPath) {
   const ytdlp = await getYtDlp();
   const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a|aiff|ogg)$/i, '');
 
+  // Look for a cookies file saved at the project root
+  const cookiesPath = path.join(__dirname, '..', 'sc-cookies.txt');
+  const hasCookies = fs.existsSync(cookiesPath);
+
   // Try formats in order of preference:
   // 1. 'download' = SoundCloud's original file endpoint (WAV/FLAC if uploader enabled downloads)
   // 2. 'bestaudio' = highest quality stream (usually 128kbps MP3)
   const formatAttempts = [
+    ...(hasCookies ? [['--format', 'download', '--cookies', cookiesPath]] : []),
     ['--format', 'download', '--cookies-from-browser', 'chrome'],
     ['--format', 'download', '--cookies-from-browser', 'firefox'],
     ['--format', 'download', '--cookies-from-browser', 'edge'],
-    ['--format', 'download'],           // no cookies — works if track is public + downloads on
     ['--format', 'bestaudio/best'],     // final fallback: stream
   ];
 
