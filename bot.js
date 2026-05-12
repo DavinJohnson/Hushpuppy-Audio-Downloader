@@ -8,6 +8,7 @@ const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Attachment
 const { sanitizeFilename } = require('./lib');
 const { detectPlatform } = require('./platforms');
 const { checkDemucs, splitStems, VALID_STEMS } = require('./lib/stems');
+const { uploadToLitterbox } = require('./lib/upload');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -98,18 +99,18 @@ async function handleDownload(input, replyFn) {
 
   const fileSize = fs.statSync(tempPath).size;
 
-  if (fileSize > DISCORD_MAX_BYTES) {
-    fs.unlinkSync(tempPath);
-    const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
-    await replyFn({
-      content: `❌ ${displayName} is **${sizeMB} MB** — over Discord's 8 MB limit. Can't attach it here.`,
-    });
-    return;
-  }
-
   try {
-    const attachment = new AttachmentBuilder(tempPath, { name: filename });
-    await replyFn({ content: `✅ ${displayName}`, files: [attachment] });
+    if (fileSize > DISCORD_MAX_BYTES) {
+      const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+      await replyFn({ content: `📤 ${displayName} is **${sizeMB} MB** — uploading to Litterbox...` });
+      const link = await uploadToLitterbox(tempPath);
+      await replyFn({
+        content: `✅ ${displayName}\n📥 **Download (link expires in 72h):** ${link}`,
+      });
+    } else {
+      const attachment = new AttachmentBuilder(tempPath, { name: filename });
+      await replyFn({ content: `✅ ${displayName}`, files: [attachment] });
+    }
   } finally {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
@@ -173,35 +174,42 @@ async function handleStems(url, stem, replyFn) {
     const bpmFile = info.bpm ? ` (${info.bpm} BPM)` : '';
     const baseLabel = sanitizeFilename(`${info.artist} - ${info.title}${bpmFile}`);
 
-    // For single stem, send directly
+    // For single stem, send directly (or upload if too large)
     if (entries.length === 1) {
       const [stemName, stemPath] = entries[0];
       const fileSize = fs.statSync(stemPath).size;
+      const filename = `${baseLabel} [${stemName}].wav`;
       if (fileSize > DISCORD_MAX_BYTES) {
         const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
-        await replyFn({ content: `❌ ${displayName} **[${stemName}]** is **${sizeMB} MB** — over Discord's 8 MB limit.` });
-        return;
+        await replyFn({ content: `📤 **[${stemName}]** is **${sizeMB} MB** — uploading to Litterbox...` });
+        const link = await uploadToLitterbox(stemPath);
+        await replyFn({
+          content: `✅ ${displayName} — **${stemName}** stem\n📥 **Download (link expires in 72h):** ${link}`,
+        });
+      } else {
+        const attachment = new AttachmentBuilder(stemPath, { name: filename });
+        await replyFn({ content: `✅ ${displayName} — **${stemName}** stem`, files: [attachment] });
       }
-      const filename = `${baseLabel} [${stemName}].wav`;
-      const attachment = new AttachmentBuilder(stemPath, { name: filename });
-      await replyFn({ content: `✅ ${displayName} — **${stemName}** stem`, files: [attachment] });
 
     } else {
-      // Multiple stems: send each that fits, warn about oversized ones
+      // Multiple stems: attach small ones, upload large ones to Litterbox
       const attachments = [];
-      const oversized = [];
+      const links = [];
       for (const [stemName, stemPath] of entries) {
         const fileSize = fs.statSync(stemPath).size;
+        const filename = `${baseLabel} [${stemName}].wav`;
         if (fileSize > DISCORD_MAX_BYTES) {
-          oversized.push(`${stemName} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+          const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+          await replyFn({ content: `📤 **[${stemName}]** is **${sizeMB} MB** — uploading to Litterbox...` });
+          const link = await uploadToLitterbox(stemPath);
+          links.push(`**${stemName}:** ${link}`);
         } else {
-          attachments.push(new AttachmentBuilder(stemPath, { name: `${baseLabel} [${stemName}].wav` }));
+          attachments.push(new AttachmentBuilder(stemPath, { name: filename }));
         }
       }
-      let content = `✅ ${displayName} — stems`;
-      if (oversized.length) content += `\n⚠️ Couldn't attach (over 8 MB): ${oversized.join(', ')}`;
 
-      // Discord allows up to 10 attachments per message
+      let content = `✅ ${displayName} — stems`;
+      if (links.length) content += `\n📥 **Download links (expire in 72h):**\n${links.join('\n')}`;
       await replyFn({ content, files: attachments });
     }
 
