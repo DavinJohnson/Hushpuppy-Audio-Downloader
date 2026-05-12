@@ -46,15 +46,34 @@ async function getClientId() {
   throw new Error('Could not extract SoundCloud client_id');
 }
 
+/**
+ * Extract secret_token from private share links.
+ * Private URLs look like: /track-slug/s-XXXXXXXX or ?secret_token=s-XXXXXXXX
+ */
+function extractSecretToken(url) {
+  // Query param form: ?secret_token=s-XXXX
+  const qMatch = url.match(/[?&]secret_token=(s-[a-zA-Z0-9]+)/);
+  if (qMatch) return qMatch[1];
+  // Path form: /s-XXXX at end of path (before any query)
+  const pathMatch = url.match(/\/(s-[a-zA-Z0-9]+)(?:[/?#]|$)/);
+  if (pathMatch) return pathMatch[1];
+  return null;
+}
+
 function detect(url) {
   return /soundcloud\.com/i.test(url);
 }
 
 async function getInfo(input) {
   const clientId = await getClientId();
-  const resolveUrl = `${API}/resolve?url=${encodeURIComponent(input.trim())}&client_id=${clientId}`;
+  const secretToken = extractSecretToken(input.trim());
+
+  let resolveUrl = `${API}/resolve?url=${encodeURIComponent(input.trim())}&client_id=${clientId}`;
+  if (secretToken) resolveUrl += `&secret_token=${secretToken}`;
+
   const { status, body } = await get(resolveUrl, { headers: SC_HEADERS });
 
+  if (status === 401) throw new Error('SoundCloud returned 401 — track is private or the share link is invalid');
   if (status === 404) throw new Error('Track not found on SoundCloud (may be private or deleted)');
   if (status !== 200) throw new Error(`SoundCloud API returned HTTP ${status}`);
 
@@ -63,29 +82,62 @@ async function getInfo(input) {
 
   if (track.kind !== 'track') throw new Error('URL does not point to a SoundCloud track');
 
+  // Check if the track has a direct WAV/original download available
+  const hasDownload = track.downloadable && track.has_downloads_left;
+  const downloadUrl = hasDownload ? track.download_url : null;
+
   // Prefer progressive (direct MP3), fall back to HLS
   const progressive = track.media?.transcodings?.find((t) => t.format?.protocol === 'progressive');
   const hls = track.media?.transcodings?.find((t) => t.format?.protocol === 'hls' && !t.format?.mime_type?.includes('encrypted'));
 
   const transcoding = progressive || hls;
-  if (!transcoding) throw new Error('No playable stream found for this SoundCloud track');
+  if (!transcoding && !downloadUrl) throw new Error('No playable stream found for this SoundCloud track');
+
+  // Use WAV download if available, otherwise stream
+  const ext = downloadUrl ? (track.original_format || 'wav') : 'mp3';
 
   return {
     title: track.title || 'Unknown',
     artist: track.user?.username || 'Unknown',
     bpm: null,
-    _transcodingUrl: transcoding.url,
+    _downloadUrl: downloadUrl,
+    _transcodingUrl: transcoding?.url || null,
     _clientId: clientId,
-    _isHls: !progressive,
-    ext: 'mp3',
+    _secretToken: secretToken,
+    _isHls: !progressive && !downloadUrl,
+    ext,
   };
 }
 
 async function downloadTrack(input, destPath) {
   const info = await getInfo(input);
 
-  // Resolve the stream URL (transcoding endpoint gives a temp URL)
-  const { status, body } = await get(`${info._transcodingUrl}?client_id=${info._clientId}`, { headers: SC_HEADERS });
+  // If track has a direct download (WAV/original), use that first
+  if (info._downloadUrl) {
+    let dlUrl = `${info._downloadUrl}?client_id=${info._clientId}`;
+    if (info._secretToken) dlUrl += `&secret_token=${info._secretToken}`;
+
+    const { status, body } = await get(dlUrl, { headers: SC_HEADERS });
+    if (status === 200) {
+      // Response is JSON with a redirect URL
+      try {
+        const data = JSON.parse(body);
+        if (data.redirectUri) {
+          await download(data.redirectUri, destPath);
+          return info;
+        }
+      } catch {}
+    }
+    // Fall through to stream if direct download fails
+  }
+
+  // Resolve the stream URL (transcoding endpoint gives a temp signed URL)
+  if (!info._transcodingUrl) throw new Error('No stream available for this track');
+
+  let streamResolveUrl = `${info._transcodingUrl}?client_id=${info._clientId}`;
+  if (info._secretToken) streamResolveUrl += `&secret_token=${info._secretToken}`;
+
+  const { status, body } = await get(streamResolveUrl, { headers: SC_HEADERS });
   if (status !== 200) throw new Error(`SoundCloud stream resolve returned HTTP ${status}`);
 
   let streamData;
