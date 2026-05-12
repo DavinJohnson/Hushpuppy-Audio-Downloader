@@ -25,24 +25,29 @@ async function downloadViaYtDlp(url, destPath) {
   const ytdlp = await getYtDlp();
   const destNoExt = destPath.replace(/\.(mp3|wav|flac|m4a|aiff|ogg)$/i, '');
 
-  const baseArgs = [
-    url,
-    '--format', 'bestaudio/best',
-    '--no-playlist',
-    '--output', destNoExt + '.%(ext)s',
-    '--quiet',
-    '--no-warnings',
+  // Try formats in order of preference:
+  // 1. 'download' = SoundCloud's original file endpoint (WAV/FLAC if uploader enabled downloads)
+  // 2. 'bestaudio' = highest quality stream (usually 128kbps MP3)
+  const formatAttempts = [
+    ['--format', 'download', '--cookies-from-browser', 'chrome'],
+    ['--format', 'download', '--cookies-from-browser', 'firefox'],
+    ['--format', 'download', '--cookies-from-browser', 'edge'],
+    ['--format', 'download'],           // no cookies — works if track is public + downloads on
+    ['--format', 'bestaudio/best'],     // final fallback: stream
   ];
 
-  // Try with browser cookies first (gets original WAV when downloads are enabled)
-  // Falls back to unauthenticated if cookies aren't available
-  const browsers = ['chrome', 'firefox', 'edge'];
   let success = false;
-
-  for (const browser of browsers) {
+  for (const extraArgs of formatAttempts) {
     try {
       await new Promise((resolve, reject) => {
-        ytdlp.exec([...baseArgs, '--cookies-from-browser', browser])
+        ytdlp.exec([
+          url,
+          ...extraArgs,
+          '--no-playlist',
+          '--output', destNoExt + '.%(ext)s',
+          '--quiet',
+          '--no-warnings',
+        ])
           .on('ytDlpEvent', () => {})
           .on('error', reject)
           .on('close', resolve);
@@ -50,19 +55,11 @@ async function downloadViaYtDlp(url, destPath) {
       success = true;
       break;
     } catch {
-      // browser not found or no cookies — try next
+      // try next
     }
   }
 
-  // Final fallback: no cookies
-  if (!success) {
-    await new Promise((resolve, reject) => {
-      ytdlp.exec(baseArgs)
-        .on('ytDlpEvent', () => {})
-        .on('error', reject)
-        .on('close', resolve);
-    });
-  }
+  if (!success) throw new Error('All download attempts failed for this SoundCloud track');
 
   // Rename to destPath regardless of extension yt-dlp chose
   if (!fs.existsSync(destPath)) {
