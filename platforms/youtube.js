@@ -35,11 +35,28 @@ function detect(url) {
 
 async function getInfo(input) {
   const ytdlp = await getYtDlp();
-  const metadata = await ytdlp.getVideoInfo(input.trim());
+
+  // getVideoInfo uses "-f best" internally which breaks — use --dump-json directly
+  const raw = await new Promise((resolve, reject) => {
+    let out = '';
+    ytdlp.exec([
+      input.trim(),
+      '--dump-json',
+      '--no-playlist',
+      '--js-runtimes', 'nodejs',
+      '--quiet',
+      '--no-warnings',
+    ])
+      .on('ytDlpEvent', (event, data) => { if (event === 'stdout') out += data; })
+      .on('error', reject)
+      .on('close', () => {
+        try { resolve(JSON.parse(out)); } catch { reject(new Error('Could not parse yt-dlp metadata')); }
+      });
+  });
 
   return {
-    title: metadata.title || 'Unknown',
-    artist: metadata.uploader || metadata.channel || 'Unknown',
+    title: raw.title || 'Unknown',
+    artist: raw.uploader || raw.channel || 'Unknown',
     bpm: null,
     ext: 'mp3',
     _url: input.trim(),
@@ -64,6 +81,7 @@ async function downloadTrack(input, destPath) {
       '--quiet',
       '--no-warnings',
       '--no-check-certificates',
+      '--js-runtimes', 'nodejs',
     ])
       .on('ytDlpEvent', () => {})
       .on('error', reject)
