@@ -1,18 +1,17 @@
 'use strict';
 
 const path = require('path');
-const os = require('os');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const YTDlpWrap = require('yt-dlp-wrap').default;
 
-// Store the yt-dlp binary next to the project
 const BINARY_DIR = path.join(__dirname, '..', '.bin');
 const BINARY_PATH = path.join(BINARY_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 
-let _ytdlp = null;
+let _ready = false;
 
-async function getYtDlp() {
-  if (_ytdlp) return _ytdlp;
+async function ensureYtDlp() {
+  if (_ready) return;
 
   if (!fs.existsSync(BINARY_PATH)) {
     fs.mkdirSync(BINARY_DIR, { recursive: true });
@@ -21,12 +20,17 @@ async function getYtDlp() {
     console.log('  yt-dlp ready.');
   }
 
-  _ytdlp = new YTDlpWrap(BINARY_PATH);
+  _ready = true;
+}
 
-  // Auto-update yt-dlp in the background — old versions get throttled by YouTube
-  _ytdlp.exec(['--update']).on('close', () => {}).on('error', () => {});
-
-  return _ytdlp;
+// Run yt-dlp directly via execFile — avoids yt-dlp-wrap quirks
+function ytdlp(args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(BINARY_PATH, args, { maxBuffer: 10 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(stderr || err.message));
+      resolve(stdout);
+    });
+  });
 }
 
 function detect(url) {
@@ -34,25 +38,18 @@ function detect(url) {
 }
 
 async function getInfo(input) {
-  const ytdlp = await getYtDlp();
+  await ensureYtDlp();
 
-  // getVideoInfo uses "-f best" internally which breaks — use --dump-json directly
-  const raw = await new Promise((resolve, reject) => {
-    let out = '';
-    ytdlp.exec([
-      input.trim(),
-      '--dump-json',
-      '--no-playlist',
-      '--js-runtimes', 'nodejs',
-      '--quiet',
-      '--no-warnings',
-    ])
-      .on('ytDlpEvent', (event, data) => { if (event === 'stdout') out += data; })
-      .on('error', reject)
-      .on('close', () => {
-        try { resolve(JSON.parse(out)); } catch { reject(new Error('Could not parse yt-dlp metadata')); }
-      });
-  });
+  const stdout = await ytdlp([
+    input.trim(),
+    '--dump-json',
+    '--no-playlist',
+    '--quiet',
+    '--no-warnings',
+  ]);
+
+  let raw;
+  try { raw = JSON.parse(stdout); } catch { throw new Error('Could not parse YouTube metadata'); }
 
   return {
     title: raw.title || 'Unknown',
@@ -64,37 +61,35 @@ async function getInfo(input) {
 }
 
 async function downloadTrack(input, destPath) {
-  const ytdlp = await getYtDlp();
+  await ensureYtDlp();
 
-  // yt-dlp outputs to a path — strip the .mp3 extension since yt-dlp adds its own
-  const destNoExt = destPath.replace(/\.mp3$/, '');
+  const destNoExt = destPath.replace(/\.mp3$/i, '');
 
-  await new Promise((resolve, reject) => {
-    ytdlp.exec([
-      input.trim(),
-      '--format', 'bestaudio[ext=m4a]/bestaudio/best',  // audio-only stream, no video download
-      '--extract-audio',
-      '--audio-format', 'mp3',
-      '--audio-quality', '0',
-      '--no-playlist',
-      '--output', destNoExt + '.%(ext)s',
-      '--quiet',
-      '--no-warnings',
-      '--no-check-certificates',
-      '--js-runtimes', 'nodejs',
-    ])
-      .on('ytDlpEvent', () => {})
-      .on('error', reject)
-      .on('close', resolve);
-  });
+  await ytdlp([
+    input.trim(),
+    '--format', 'bestaudio/best',
+    '--extract-audio',
+    '--audio-format', 'mp3',
+    '--audio-quality', '0',
+    '--no-playlist',
+    '--output', destNoExt + '.%(ext)s',
+    '--no-warnings',
+  ]);
 
-  // yt-dlp names the file itself — confirm it exists
+  // yt-dlp writes destNoExt.mp3 after conversion
   if (!fs.existsSync(destPath)) {
-    throw new Error('yt-dlp finished but output file not found');
+    // check for any audio file with this base in case ext differs
+    const exts = ['mp3', 'm4a', 'webm', 'ogg', 'opus'];
+    for (const ext of exts) {
+      const candidate = destNoExt + '.' + ext;
+      if (fs.existsSync(candidate)) {
+        fs.renameSync(candidate, destPath);
+        break;
+      }
+    }
   }
 
-  const info = await getInfo(input);
-  return info;
+  if (!fs.existsSync(destPath)) throw new Error('yt-dlp finished but output file not found');
 }
 
 module.exports = { detect, getInfo, downloadTrack };
