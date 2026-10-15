@@ -65,7 +65,7 @@ async function downloadTrack(input, destPath) {
 
   const destNoExt = destPath.replace(/\.mp3$/i, '');
 
-  await ytdlp([
+  const result = await ytdlp([
     input.trim(),
     '--format', 'bestaudio/best',
     '--extract-audio',
@@ -73,8 +73,8 @@ async function downloadTrack(input, destPath) {
     '--audio-quality', '0',
     '--no-playlist',
     '--output', destNoExt + '.%(ext)s',
-    '--no-warnings',
   ]);
+  if (result) console.log('[yt-dlp]', result.slice(0, 500));
 
   // yt-dlp writes destNoExt.mp3 after conversion
   if (!fs.existsSync(destPath)) {

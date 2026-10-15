@@ -98,6 +98,7 @@ async function handleDownload(input, replyFn) {
   }
 
   const fileSize = fs.statSync(tempPath).size;
+  console.log(`[download] ${filename} — ${(fileSize / 1024).toFixed(1)} KB`);
 
   try {
     if (fileSize > DISCORD_MAX_BYTES) {
